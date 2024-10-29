@@ -5,8 +5,9 @@ import random
 import time
 import logging
 from datetime import datetime
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, List, Optional
 
 # Imports de terceiros
 import streamlit as st
@@ -14,15 +15,26 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 from fake_useragent import UserAgent
-import json
 
-class AdvancedWebScraper:
+class DirectWebScraper:
     def __init__(self):
         self.user_agents = UserAgent()
         self.session = requests.Session()
-        self.found_items = set()
         self.setup_logging()
-    
+        
+        # Padrões predefinidos de extração
+        self.default_patterns = {
+            'email': r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}',
+            'telefone_br': r'(?:\+55\s?)?(?:\(?\d{2}\)?[\s-]?)?\d{4,5}[-\s]?\d{4}',
+            'celular_br': r'(?:\+55\s?)?(?:\(?\d{2}\)?[\s-]?)?9\d{4}[-\s]?\d{4}',
+            'whatsapp': r'(?:whatsapp|whats|wpp|wap)(?:\s*:)?\s*(?:\+55\s?)?(?:\(?\d{2}\)?[\s-]?)?9?\d{4}[-\s]?\d{4}',
+            'cnpj': r'\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2}',
+            'cep': r'\d{5}-?\d{3}',
+            'instagram': r'(?:instagram\.com|instagr\.am|ig)/([A-Za-z0-9_](?:(?:[A-Za-z0-9_]|(?:\.(?!\.))){0,28}(?:[A-Za-z0-9_]))?)',
+            'facebook': r'(?:facebook\.com|fb\.com)/(?:(?:\w)*#!\/)?(?:pages\/)?(?:[?\w\-]*\/)*?([A-Za-z0-9_](?:(?:[A-Za-z0-9_]|(?:\.(?!\.))){0,28}(?:[A-Za-z0-9_]))?)',
+            'linkedin': r'linkedin\.com/(?:in|company)/([A-Za-z0-9_-]+)',
+        }
+        
     def setup_logging(self):
         """Configura o sistema de logging"""
         logging.basicConfig(
@@ -47,12 +59,19 @@ class AdvancedWebScraper:
             'Accept-Encoding': 'gzip, deflate, br',
             'DNT': '1',
             'Connection': 'keep-alive',
-            'Cache-Control': 'max-age=0',
             'Upgrade-Insecure-Requests': '1'
         }
     
-    def extract_data(self, text, patterns):
-        """Extrai dados baseados em padrões personalizados"""
+    def is_valid_url(self, url: str) -> bool:
+        """Verifica se a URL é válida"""
+        try:
+            result = urlparse(url)
+            return all([result.scheme, result.netloc]) and result.scheme in ['http', 'https']
+        except:
+            return False
+    
+    def extract_data_from_text(self, text: str, patterns: Dict[str, str]) -> Dict[str, List[str]]:
+        """Extrai dados do texto baseado nos padrões fornecidos"""
         results = {}
         for pattern_name, pattern in patterns.items():
             try:
@@ -64,217 +83,182 @@ class AdvancedWebScraper:
                 results[pattern_name] = []
         return results
     
-    def is_valid_url(self, url):
-        """Verifica se a URL é válida"""
-        try:
-            result = urlparse(url)
-            return all([result.scheme, result.netloc]) and result.scheme in ['http', 'https']
-        except:
-            return False
+    def normalize_url(self, url: str) -> str:
+        """Normaliza a URL fornecida"""
+        if not url.startswith(('http://', 'https://')):
+            url = 'https://' + url
+        return url
     
-    def create_search_url(self, base_url, query, page=1):
-        """Gera URLs de busca para diferentes engines"""
-        encoded_query = quote_plus(query)
-        if "duckduckgo" in base_url:
-            return f"https://html.duckduckgo.com/html/?q={encoded_query}"
-        elif "google" in base_url:
-            return f"https://www.google.com/search?q={encoded_query}&start={(page-1)*10}"
-        elif "bing" in base_url:
-            return f"https://www.bing.com/search?q={encoded_query}&first={(page-1)*10}"
-        return f"{base_url}?q={encoded_query}"
-
-    def scrape_page(self, url, patterns, selector_config):
-        """Scraping de uma página individual com configurações personalizadas"""
+    def get_internal_links(self, soup: BeautifulSoup, base_url: str) -> List[str]:
+        """Extrai links internos da página"""
+        internal_links = []
+        domain = urlparse(base_url).netloc
+        
+        for link in soup.find_all('a', href=True):
+            href = link['href']
+            if href.startswith('/'):
+                href = base_url + href
+            elif href.startswith(('http://', 'https://')):
+                if domain in href:
+                    internal_links.append(href)
+            elif not href.startswith(('#', 'mailto:', 'tel:', 'javascript:')):
+                href = base_url + '/' + href
+                internal_links.append(href)
+                
+        return list(set(internal_links))
+    
+    def get_page_content(self, url: str) -> Optional[BeautifulSoup]:
+        """Obtém o conteúdo de uma página"""
         try:
             time.sleep(self.get_random_delay())
             response = self.session.get(url, headers=self.get_headers(), timeout=15)
             response.raise_for_status()
-            
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # Extrai dados baseado nos seletores configurados
-            extracted_data = {
-                'url': url,
-                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            }
-            
-            # Busca por seletores específicos
-            for field, selectors in selector_config.items():
-                field_data = []
-                for selector in selectors:
-                    elements = soup.select(selector)
-                    if elements:
-                        field_data.extend([elem.get_text(strip=True) for elem in elements])
-                if field_data:
-                    extracted_data[field] = field_data
-            
-            # Busca por padrões regex no texto completo
-            text_content = soup.get_text()
-            pattern_matches = self.extract_data(text_content, patterns)
-            extracted_data.update(pattern_matches)
-            
-            return extracted_data
-            
+            return BeautifulSoup(response.text, 'html.parser')
         except Exception as e:
-            logging.error(f"Erro ao processar {url}: {str(e)}")
+            logging.error(f"Erro ao acessar {url}: {str(e)}")
             return None
-
-    def scrape_search_results(self, query, patterns, selector_config, search_config):
-        """Processo principal de scraping"""
-        all_results = []
         
-        for page in range(1, search_config['max_pages'] + 1):
-            try:
-                search_url = self.create_search_url(
-                    search_config['search_engine'],
-                    query,
-                    page
-                )
-                
-                response = self.session.get(search_url, headers=self.get_headers(), timeout=15)
-                soup = BeautifulSoup(response.text, 'html.parser')
-                
-                # Extrai URLs dos resultados da busca
-                urls = []
-                for link in soup.select(search_config['result_selector']):
-                    href = link.get('href')
-                    if href and self.is_valid_url(href) and not any(excluded in href for excluded in search_config['excluded_domains']):
-                        urls.append(href)
-                
-                # Processa URLs em paralelo
-                with ThreadPoolExecutor(max_workers=search_config['max_workers']) as executor:
-                    futures = [
-                        executor.submit(
-                            self.scrape_page,
-                            url,
-                            patterns,
-                            selector_config
-                        )
-                        for url in urls[:search_config['results_per_page']]
-                    ]
-                    
-                    for future in futures:
-                        result = future.result()
-                        if result:
-                            all_results.append(result)
-                
-                time.sleep(self.get_random_delay(2, 4))
-                
-            except Exception as e:
-                logging.error(f"Erro na página {page}: {str(e)}")
+    def scrape_url(self, url: str, patterns: Dict[str, str], max_internal_pages: int = 0) -> pd.DataFrame:
+        """Realiza o scraping da URL e opcionalmente de suas páginas internas"""
+        all_results = []
+        processed_urls = set()
+        urls_to_process = [self.normalize_url(url)]
+        
+        while urls_to_process and len(processed_urls) <= max_internal_pages:
+            current_url = urls_to_process.pop(0)
+            
+            if current_url in processed_urls:
                 continue
                 
-        return pd.DataFrame(all_results)
+            processed_urls.add(current_url)
+            logging.info(f"Processando: {current_url}")
+            
+            soup = self.get_page_content(current_url)
+            if not soup:
+                continue
+            
+            # Extrai dados da página atual
+            text_content = soup.get_text()
+            extracted_data = self.extract_data_from_text(text_content, patterns)
+            
+            if any(extracted_data.values()):
+                result = {
+                    'url': current_url,
+                    'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                }
+                result.update(extracted_data)
+                all_results.append(result)
+            
+            # Adiciona links internos se necessário
+            if len(processed_urls) < max_internal_pages:
+                internal_links = self.get_internal_links(soup, url)
+                urls_to_process.extend([link for link in internal_links if link not in processed_urls])
+        
+        # Cria DataFrame com os resultados
+        df = pd.DataFrame(all_results)
+        if not df.empty:
+            # Explode listas em colunas separadas
+            for col in df.columns:
+                if df[col].apply(type).eq(list).any():
+                    df = df.explode(col)
+        
+        return df
 
 def main():
-    st.title("Web Scraper Avançado")
+    st.set_page_config(page_title="Web Scraper Direto", layout="wide")
     
+    st.title("Web Scraper Direto")
     st.markdown("""
-    ### Configurações de Busca e Extração
-    Configure os parâmetros de busca e os padrões de dados que deseja extrair.
+    ### Extraia dados específicos de qualquer website
+    Insira a URL e selecione os tipos de dados que deseja extrair.
     """)
     
-    # Configurações de Busca
-    search_engine = st.selectbox(
-        "Motor de Busca:",
-        ["https://html.duckduckgo.com", "https://www.google.com", "https://www.bing.com"]
-    )
+    # Input da URL
+    url = st.text_input("URL do site:", placeholder="Exemplo: www.exemplo.com.br")
     
-    query = st.text_input("Termos de Busca:", "")
-    max_pages = st.slider("Número de Páginas:", 1, 20, 3)
+    # Configurações de scraping
+    col1, col2 = st.columns(2)
     
-    # Configurações de Padrões
-    st.subheader("Padrões de Extração")
+    with col1:
+        st.subheader("Dados para Extrair")
+        scraper = DirectWebScraper()
+        
+        # Seleção de padrões predefinidos
+        selected_patterns = {}
+        for pattern_name in scraper.default_patterns.keys():
+            if st.checkbox(pattern_name.replace('_', ' ').title()):
+                selected_patterns[pattern_name] = scraper.default_patterns[pattern_name]
     
-    # Padrões predefinidos
-    default_patterns = {
-        "emails": r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}',
-        "phones": r'(?:\+55|0)?(?:\s|-)?(?:\d{2})(?:\s|-)?(?:9\s?)?\d{4}(?:\s|-)?\d{4}',
-        "websites": r'https?://(?:www\.)?[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:/[^\s]*)?'
-    }
-    
-    # Interface para adicionar padrões personalizados
-    custom_patterns = {}
-    if st.checkbox("Adicionar Padrões Personalizados"):
-        pattern_name = st.text_input("Nome do Padrão:")
-        pattern_regex = st.text_input("Expressão Regular:")
-        if st.button("Adicionar Padrão") and pattern_name and pattern_regex:
-            custom_patterns[pattern_name] = pattern_regex
-    
-    # Combina padrões predefinidos e personalizados
-    patterns = {**default_patterns, **custom_patterns}
-    
-    # Configurações avançadas
-    with st.expander("Configurações Avançadas"):
-        max_workers = st.slider("Threads Simultâneas:", 1, 10, 3)
-        results_per_page = st.slider("Resultados por Página:", 5, 30, 10)
-        min_delay = st.slider("Delay Mínimo (s):", 1, 5, 2)
-        max_delay = st.slider("Delay Máximo (s):", 3, 10, 5)
+    with col2:
+        st.subheader("Configurações Avançadas")
+        max_internal_pages = st.slider(
+            "Número máximo de páginas internas:",
+            0, 20, 0,
+            help="0 = apenas a página principal, >0 = inclui páginas internas"
+        )
+        
+        # Padrão personalizado
+        if st.checkbox("Adicionar Padrão Personalizado"):
+            pattern_name = st.text_input("Nome do padrão:")
+            pattern_regex = st.text_input("Expressão regular:")
+            if pattern_name and pattern_regex:
+                selected_patterns[pattern_name] = pattern_regex
     
     if st.button("Iniciar Scraping"):
-        if not query:
-            st.warning("Por favor, insira os termos de busca.")
+        if not url:
+            st.warning("Por favor, insira uma URL.")
             return
-
-        search_config = {
-            'search_engine': search_engine,
-            'max_pages': max_pages,
-            'max_workers': max_workers,
-            'results_per_page': results_per_page,
-            'result_selector': '.result__url' if 'duckduckgo' in search_engine else 'a',
-            'excluded_domains': ['.pdf', '.doc', '.docx', '.xlsx', '.txt']
-        }
-        
-        selector_config = {
-            'title': ['h1', '.title', '.post-title'],
-            'description': ['meta[name="description"]', '.description', '.summary'],
-            'content': ['article', '.content', '.post-content', 'main']
-        }
+            
+        if not selected_patterns:
+            st.warning("Selecione pelo menos um tipo de dado para extrair.")
+            return
         
         with st.spinner("Realizando scraping..."):
-            scraper = AdvancedWebScraper()
-            df = scraper.scrape_search_results(
-                query,
-                patterns,
-                selector_config,
-                search_config
-            )
-            
-            if df.empty:
-                st.warning("Nenhum resultado encontrado. Tente modificar os termos de busca ou padrões.")
-                return
-            
-            st.success("Scraping concluído com sucesso!")
-            st.dataframe(df)
-            
-            # Preparação para download
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            
-            # Excel
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                df.to_excel(writer, sheet_name='Resultados', index=False)
-            
-            buffer.seek(0)
-            
-            # Botão de download Excel
-            st.download_button(
-                label="Download Excel",
-                data=buffer,
-                file_name=f"scraping_results_{timestamp}.xlsx",
-                mime="application/vnd.ms-excel"
-            )
-            
-            # JSON
-            json_str = df.to_json(orient='records', force_ascii=False, indent=2)
-            
-            # Botão de download JSON
-            st.download_button(
-                label="Download JSON",
-                data=json_str.encode('utf-8'),
-                file_name=f"scraping_results_{timestamp}.json",
-                mime="application/json"
-            )
+            try:
+                df = scraper.scrape_url(url, selected_patterns, max_internal_pages)
+                
+                if df.empty:
+                    st.warning("Nenhum dado encontrado com os padrões selecionados.")
+                    return
+                
+                st.success("Scraping concluído com sucesso!")
+                
+                # Exibe resultados
+                st.subheader("Resultados Encontrados")
+                st.dataframe(df)
+                
+                # Prepara downloads
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                
+                # Excel
+                buffer = io.BytesIO()
+                with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+                    df.to_excel(writer, sheet_name='Resultados', index=False)
+                buffer.seek(0)
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.download_button(
+                        label="Download Excel",
+                        data=buffer,
+                        file_name=f"scraping_results_{timestamp}.xlsx",
+                        mime="application/vnd.ms-excel"
+                    )
+                
+                with col2:
+                    # JSON
+                    json_str = df.to_json(orient='records', force_ascii=False, indent=2)
+                    st.download_button(
+                        label="Download JSON",
+                        data=json_str.encode('utf-8'),
+                        file_name=f"scraping_results_{timestamp}.json",
+                        mime="application/json"
+                    )
+                    
+            except Exception as e:
+                st.error(f"Erro durante o scraping: {str(e)}")
+                logging.error(f"Erro: {str(e)}")
 
 if __name__ == "__main__":
-    main()
+    main()    
